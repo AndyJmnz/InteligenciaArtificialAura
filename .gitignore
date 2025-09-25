@@ -1,0 +1,40 @@
+# Python
+/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.coverage
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application specific
+logs/
+*_mejorada.jpg
+temp_images/
+test_*.py
+
+# Docker
+.dockerignore
+
+# Conda environment
+.conda/
