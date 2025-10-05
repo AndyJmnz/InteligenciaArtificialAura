@@ -6,6 +6,7 @@ from PIL import Image, ImageEnhance, ImageFilter
 from paddleocr import PaddleOCR
 import requests
 import tempfile
+import json
 import os
 from dotenv import load_dotenv
 
@@ -142,7 +143,7 @@ def preprocess_image_advanced(image_path: str):
 def send_to_deepseek(extracted_text: str):
     """Envía el texto extraído a DeepSeek para corrección"""
     try:
-        prompt = f"""Corrige y mejora este texto extraído por OCR. Mantén el significado original y responde solo con el texto corregido:
+        prompt = f"""Corrige y mejora este texto extraído por OCR. Mantén el significado original y haz un resumen con las palabras clave del texto. Responde solo con el texto corregido:
 
 Texto: {extracted_text}
 
@@ -358,6 +359,135 @@ def calculate_text_similarity(text1: str, text2: str) -> float:
     
     return len(intersection) / len(union) if union else 0.0
 
+
+def generate_qa_material(extracted_text: str, num_questions: int = 5):
+    """Genera material de estudio con preguntas y respuestas a partir del texto extraído"""
+    try:
+        # Verificar si hay suficiente texto para generar material
+        if not extracted_text or len(extracted_text.strip().split()) < 10:
+            return {
+                "error": "El texto extraído es insuficiente para generar material de estudio",
+                "qa_pairs": []
+            }
+        
+        prompt = f"""Actúa como un profesor experto. Basándote en el siguiente texto extraído de una imagen, 
+        genera {num_questions} preguntas y respuestas de estudio. Cada pregunta debe tener una respuesta concisa 
+        pero completa. Enfócate en los conceptos clave, términos importantes y relaciones principales.
+
+        TEXTO:
+        {extracted_text}
+
+        Formato de salida: DEBES responder ÚNICAMENTE con un objeto JSON válido con la siguiente estructura exacta:
+        {{"qa_pairs": [
+            {{"pregunta": "pregunta 1", "respuesta": "respuesta 1"}},
+            {{"pregunta": "pregunta 2", "respuesta": "respuesta 2"}},
+            ...
+        ]}}
+        """
+
+        payload = {
+            "model": "deepseek/deepseek-chat",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Eres un asistente educativo experto. Responde siempre en formato JSON válido."
+                },
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 2000,
+            "response_format": {"type": "json_object"}
+        }
+        
+        print("Enviando solicitud a DeepSeek...")
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=45)
+        
+        if response.status_code == 200:
+            result = response.json()
+            response_content = result['choices'][0]['message']['content'].strip()
+            print(f"Respuesta recibida: {response_content[:100]}...")
+            
+            # Intentar parsear la respuesta como JSON
+            try:
+                qa_material = json.loads(response_content)
+                
+                # Verificar estructura esperada y adaptarla si es necesario
+                if not isinstance(qa_material, dict):
+                    return {"error": "Formato JSON inesperado", "qa_pairs": []}
+                
+                # Asegurar que existe la clave qa_pairs
+                if "qa_pairs" not in qa_material:
+                    # Buscar claves alternativas como "preguntas" o "questions"
+                    alternative_keys = ["preguntas", "questions", "qaPairs", "results"]
+                    for key in alternative_keys:
+                        if key in qa_material and isinstance(qa_material[key], list):
+                            qa_material["qa_pairs"] = qa_material[key]
+                            break
+                    else:
+                        # Si no hay claves alternativas, intentar construir desde el primer nivel
+                        qa_pairs = []
+                        if isinstance(qa_material, dict):
+                            for k, v in qa_material.items():
+                                if isinstance(v, dict) and "pregunta" in v and "respuesta" in v:
+                                    qa_pairs.append(v)
+                                elif isinstance(v, str) and k.startswith(("pregunta", "question")):
+                                    answer_key = k.replace("pregunta", "respuesta").replace("question", "answer")
+                                    if answer_key in qa_material:
+                                        qa_pairs.append({"pregunta": v, "respuesta": qa_material[answer_key]})
+                            
+                            if qa_pairs:
+                                qa_material["qa_pairs"] = qa_pairs
+                            else:
+                                qa_material["qa_pairs"] = []
+                                qa_material["error"] = "No se pudo determinar el formato de preguntas y respuestas"
+                
+                return qa_material
+                
+            except json.JSONDecodeError as json_err:
+                print(f"Error decodificando JSON: {json_err}")
+                # Intentar extraer la sección JSON usando regex
+                import re
+                json_patterns = [
+                    r'```json\n([\s\S]*?)\n```',  # Markdown code block
+                    r'\{[\s\S]*\}'  # Any JSON object
+                ]
+                
+                for pattern in json_patterns:
+                    json_match = re.search(pattern, response_content)
+                    if json_match:
+                        try:
+                            qa_material = json.loads(json_match.group(1) if pattern.startswith('```') else json_match.group(0))
+                            # Aplicar las mismas verificaciones de estructura
+                            if "qa_pairs" not in qa_material:
+                                qa_material["qa_pairs"] = []
+                                qa_material["error"] = "Estructura JSON incompleta"
+                            return qa_material
+                        except:
+                            pass
+                
+                # Si todo falla, crear estructura mínima y devolver respuesta cruda
+                return {
+                    "error": "No se pudo parsear el formato JSON",
+                    "raw_response": response_content,
+                    "qa_pairs": []
+                }
+        else:
+            print(f"Error en API DeepSeek: {response.status_code}, {response.text}")
+            return {
+                "error": f"Error en API: {response.status_code}",
+                "qa_pairs": []
+            }
+            
+    except Exception as e:
+        print(f"Error generando material QA: {e}")
+        return {
+            "error": str(e),
+            "qa_pairs": []
+        }
+
 # ---------------------------
 # ENDPOINTS FASTAPI
 # ---------------------------
@@ -437,3 +567,97 @@ async def ocr_endpoint(file: UploadFile = File(...)):
         )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+    
+@app.post("/ocr/study")
+async def ocr_study_endpoint(file: UploadFile = File(...), num_questions: int = 5):
+    tmp_path = None
+    try:
+        # Validar el archivo subido
+        file_content = await file.read()
+        if not file_content:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Archivo vacío o no válido"}
+            )
+            
+        # Guardar archivo temporalmente con manejo explícito de excepciones
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                tmp.write(file_content)
+                tmp_path = tmp.name
+                print(f"Archivo guardado temporalmente en: {tmp_path}")
+        except Exception as file_error:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"Error guardando archivo temporal: {str(file_error)}"}
+            )
+
+        # Extraer texto con manejo explícito de errores
+        try:
+            extracted_text, details = extract_text_improved(tmp_path, min_confidence=0.3)
+            print(f"Texto extraído: {extracted_text[:100]}...")
+        except Exception as extract_error:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"Error extrayendo texto: {str(extract_error)}"}
+            )
+
+        # Verificar si hay texto suficiente
+        if not extracted_text or len(extracted_text.strip()) < 10:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No se detectó texto suficiente en la imagen para generar material de estudio."}
+            )
+
+        # Corregir texto extraído con manejo de errores
+        try:
+            corrected_text = send_to_deepseek_improved(extracted_text)
+            print(f"Texto corregido: {corrected_text[:100]}...")
+        except Exception as correct_error:
+            # Si falla la corrección, usar el texto original
+            print(f"Error en corrección: {str(correct_error)}")
+            corrected_text = extracted_text
+
+        # Generar material de estudio QA con manejo de errores
+        try:
+            qa_material = generate_qa_material(corrected_text, num_questions)
+            # Verificar estructura del material QA
+            if not isinstance(qa_material, dict):
+                qa_material = {"error": "Formato de respuesta incorrecto", "qa_pairs": []}
+            elif "qa_pairs" not in qa_material and not any(key.startswith('error') for key in qa_material):
+                # Intentar adaptar el formato si es posible
+                if "preguntas" in qa_material:
+                    qa_material = {"qa_pairs": qa_material["preguntas"]}
+                else:
+                    qa_material = {"qa_pairs": []}
+        except Exception as qa_error:
+            print(f"Error generando material QA: {str(qa_error)}")
+            qa_material = {"error": str(qa_error), "qa_pairs": []}
+
+        # Preparar respuesta
+        response_content = {
+            "texto_extraido": extracted_text,
+            "texto_corregido": corrected_text,
+            "material_estudio": qa_material,
+            "estadisticas": {
+                "palabras_extraidas": len(extracted_text.split()) if extracted_text.strip() else 0,
+                "num_preguntas": len(qa_material.get("qa_pairs", [])) 
+            }
+        }
+        
+        return JSONResponse(content=response_content)
+        
+    except Exception as e:
+        print(f"Error general en endpoint: {str(e)}")
+        return JSONResponse(
+            status_code=500, 
+            content={"error": f"Error procesando la solicitud: {str(e)}"}
+        )
+    finally:
+        # Limpiar archivo temporal con manejo de errores
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+                print(f"Archivo temporal eliminado: {tmp_path}")
+            except Exception as cleanup_error:
+                print(f"Error al eliminar archivo temporal: {str(cleanup_error)}")
