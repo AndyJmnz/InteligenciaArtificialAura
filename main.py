@@ -191,9 +191,6 @@ REGLAS:
 - Si hay números o códigos, mantenlos exactos
 - Conserva saltos de línea y espaciado
 
-Texto extraído por OCR:
-{extracted_text}
-
 Texto corregido (solo corrección de errores OCR):"""
 
         payload = {
@@ -201,11 +198,11 @@ Texto corregido (solo corrección de errores OCR):"""
             "messages": [
                 {
                     "role": "system",
-                    "content": "Eres un corrector de texto OCR experto. Solo corriges errores de reconocimiento de caracteres, no cambias el contenido."
+                    "content": prompt
                 },
                 {
                     "role": "user", 
-                    "content": prompt
+                    "content": extracted_text
                 }
             ],
             "temperature": 0.1,
